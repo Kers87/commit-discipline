@@ -1,0 +1,28 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.8", "3.13"]
+        exclude:
+          - os: macos-latest
+            python: "3.8"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python hooks/test_scoped_commit.py --self-test
+      - run: python hooks/test_commit_test_gate.py --self-test
+      - run: python hooks/test_plan_gate.py --self-test
+      - name: launcher finds a working Python
+        shell: bash
+        run: echo '{"tool_name":"Bash","tool_input":{"command":"git add -A"}}' | sh hooks/run.sh scoped_commit | grep -q '"deny"'

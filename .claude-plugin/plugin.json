@@ -1,0 +1,8 @@
+{
+  "name": "commit-discipline",
+  "version": "0.1.0",
+  "description": "Three guards for Claude Code: path-scoped commits for parallel sessions, commits only after a measured green test, and Plan Mode enforced by tool class.",
+  "author": { "name": "Sjoerd van Kersbergen" },
+  "license": "MIT",
+  "keywords": ["git", "commit", "hooks", "testing", "plan-mode", "guardrails"]
+}

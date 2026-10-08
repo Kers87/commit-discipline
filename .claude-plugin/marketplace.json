@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "commit-discipline",
+  "description": "Guards that keep Claude Code honest about commits: path-scoped commits, commits only after a measured green test, and Plan Mode enforced by tool class.",
+  "owner": { "name": "Sjoerd van Kersbergen" },
+  "plugins": [
+    {
+      "name": "commit-discipline",
+      "description": "Path-scoped commits for parallel sessions, commits only after a measured green test, and Plan Mode enforced by tool class.",
+      "author": { "name": "Sjoerd van Kersbergen" },
+      "category": "development",
+      "source": "./"
+    }
+  ]
+}

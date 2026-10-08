@@ -1,0 +1,28 @@
+{
+  "description": "commit-discipline: path-scoped commits, commits only after a measured green test, and Plan Mode enforced by tool class.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(?!(Read|Grep|Glob|WebFetch|WebSearch|ToolSearch|Skill|AskUserQuestion|EnterPlanMode|ExitPlanMode|TodoWrite|TaskOutput|SendMessage|ListAgents)$).*",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" plan_gate", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" scoped_commit", "timeout": 10 },
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" commit_test_gate", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" commit_test_gate", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
