@@ -15,7 +15,7 @@ No dependencies beyond Python 3.8+. Works on Windows, macOS and Linux.
 ## Install
 
 ```
-/plugin marketplace add sjoerdvankersbergen/commit-discipline
+/plugin marketplace add Kers87/commit-discipline
 /plugin install commit-discipline@commit-discipline
 ```
 
