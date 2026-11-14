@@ -20,7 +20,8 @@ def run_hook(script, stdin, env=None):
     full_env = dict(os.environ)
     full_env.update(env or {})
     data = stdin if isinstance(stdin, str) else json.dumps(stdin)
-    proc = subprocess.run([sys.executable, script], input=data.encode('utf-8'),
+    # -S: run.sh starts the hooks without the site module, so the tests do too.
+    proc = subprocess.run([sys.executable, '-S', script], input=data.encode('utf-8'),
                           capture_output=True, env=full_env, timeout=30)
     out = proc.stdout.decode('utf-8', 'replace')
     if proc.returncode not in (0, 2):
