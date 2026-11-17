@@ -37,10 +37,15 @@ the self-test that is red on 0.1.1 and green now.
 - SendMessage was allowed in Plan Mode and skipped by the hook matcher; it continues an agent
   that may write (H-11).
 
+- Found in a second read of 0.1.2 before release: a command nested deeper than the lexer can
+  follow (hundreds of `$(`) was let through; it is now refused when it mentions git. Also read
+  now: `Invoke-Expression -Command "..."`, `Start-Process git -ArgumentList ...`, an alias set
+  with `git -c alias.x=...`, and `xargs git add|commit` (refused: the paths arrive at run time).
+
 ### Changed
 - The two commit guards share one reading of a shell command (`git_calls` in `_common.py`)
   instead of two regexes that disagreed on what a git call is.
-- Self-tests: 86, 84 and 44 checks; 2, 22 and 8 mutations.
+- Self-tests: 97, 85 and 44 checks; 2, 22 and 8 mutations.
 
 ## 0.1.1 - 2026-11-14
 

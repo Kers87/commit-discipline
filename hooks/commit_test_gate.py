@@ -48,7 +48,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (COMMIT_VALUE_LONG, COMMIT_VALUE_SHORT, deny, git_calls,  # noqa: E402
+from _common import (COMMIT_VALUE_LONG, COMMIT_VALUE_SHORT, TooComplex, deny,  # noqa: E402
+                     git_calls,
                      is_within, norm, project_dir, read_input, sha256, shell_of, split_args,
                      state_dir)
 
@@ -184,7 +185,8 @@ def check_commit(data, cmd, project, tsv):
     files, unreadable = [], []          # files: (as written, canonical path)
     for call in calls:
         opts, specs, dd = split_args(call.args, COMMIT_VALUE_SHORT, COMMIT_VALUE_LONG)
-        if any(o.startswith('--pathspec-f') for o in opts) or not dd or not specs:
+        if any(o.startswith('--pathspec-f') for o in opts) or not dd or not specs \
+                or call.hidden_args:
             unreadable.append(call.text())
             continue
         expand = []
@@ -269,6 +271,11 @@ def main():
         check_commit(data, cmd, project, tsv)
     except SystemExit:
         raise
+    except TooComplex:
+        if re.search(r'(?i)commit', cmd):
+            deny('commit-test-gate: the command nests too deeply to see which files a commit '
+                 'takes along. Split it into plain commands.')
+        return
     except Exception:
         return
 

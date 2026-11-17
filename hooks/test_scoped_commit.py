@@ -128,6 +128,10 @@ CASES = [
     ('H06-add-dir', 'git add scripts/', 'allow'),
     ('H06-commit-dir', 'git commit -m x -- scripts', 'allow'),
     ('H06-add-dashdash', 'git add -- scripts/foo.py', 'allow'),
+    # 0.1.2 own second read: nesting too deep to read must not open the gate
+    ('X-deep-nesting', '$(' * 600 + 'git add -A' + ')' * 600, 'deny'),
+    ('X-deep-quoted', '"$(' * 5000 + 'git add -A', 'deny'),
+    ('X-deep-no-git', '$(' * 600 + 'echo hi' + ')' * 600, 'allow'),
     # allow: fail open
     ('allow-empty-command', '', 'allow'),
 ]
@@ -138,13 +142,30 @@ if MP:  # Git Bash spelling of the same directories
     ]
 
 
+CASES += [
+    ('X-alias-c', 'git -c alias.ci=commit ci -am x', 'deny'),
+    ('X-alias-c-shell', "git -c alias.go='!git add -A' go", 'deny'),
+    ('X-xargs-add', 'echo . | xargs git add', 'deny'),
+    ('X-xargs-commit', 'ls | xargs git commit -m x --', 'deny'),
+    ('PS:X-iex-command', 'Invoke-Expression -Command "git add -A"', 'deny'),
+    ('PS:X-start-process', 'Start-Process git -ArgumentList "add -A"', 'deny'),
+    ('PS:X-start-process-list', "Start-Process -FilePath git -ArgumentList 'commit','-am','x'", 'deny'),
+    ('PS:X-start-process-ok', 'Start-Process git -ArgumentList "status"', 'allow'),
+]
+
+
 def payload(cmd):
-    return {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': cmd}}
+    tool = 'Bash'
+    if cmd.startswith('PS:'):
+        tool, cmd = 'PowerShell', cmd[3:]
+    return {'hook_event_name': 'PreToolUse', 'tool_name': tool, 'tool_input': {'command': cmd}}
 
 
 def main():
     r = Report('scoped-commit: %d checks' % len(CASES))
     for name, cmd, want in CASES:
+        if name.startswith('PS:'):
+            name, cmd = name[3:], 'PS:' + cmd
         got = run_hook(HOOK, payload(cmd), ENV)
         r.check(name, got == want, got if got != want else '')
     got = run_hook(HOOK, 'this is not json', ENV)
@@ -163,7 +184,8 @@ def main():
             if broken is None:
                 r.check('self-test %s' % mname, False, 'mutation anchor not found')
                 continue
-            flipped = sum(run_hook(broken, payload(c[1]), ENV) == 'allow' for c in denies)
+            flipped = sum(run_hook(broken, payload(('PS:' if c[0].startswith('PS:') else '') + c[1]),
+                                   ENV) == 'allow' for c in denies)
             r.check('self-test %s' % mname, flipped == len(denies),
                     '%d of %d deny checks turned red' % (flipped, len(denies)))
     r.finish()

@@ -31,9 +31,9 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (COMMIT_VALUE_LONG, COMMIT_VALUE_SHORT, deny, git_calls,  # noqa: E402
-                     long_is, norm, project_dir, read_input, shell_of, short_has, split_args,
-                     whole_tree)
+from _common import (COMMIT_VALUE_LONG, COMMIT_VALUE_SHORT, TooComplex, deny,  # noqa: E402
+                     git_calls, long_is, norm, project_dir, read_input, shell_of, short_has,
+                     split_args, whole_tree)
 
 ADD_HINT = 'Stage only the paths of your own change: git add <exact path>.'
 COMMIT_HINT = 'Use: git commit -m "..." -- <path> [<path> ...].'
@@ -98,11 +98,19 @@ def main():
     project = project_dir(data)
     try:
         calls = git_calls(cmd, project, norm(data.get('cwd')), shell_of(data))
+    except TooComplex:
+        if re.search(r'(?i)git', cmd):
+            block(cmd[:80] + '...', 'the command nests too deeply to read which git calls it '
+                  'makes', 'Split it into plain commands.')
+        return
     except Exception:
         return
     for call in calls:
         if not call.in_project:
             continue
+        if call.hidden_args and call.sub in ('add', 'stage', 'commit'):
+            block(call.text(), 'xargs adds paths at run time, so which paths this takes along '
+                  'cannot be seen', 'Name the paths in the command itself.')
         if call.sub in ('add', 'stage'):
             check_add(call, project)
         elif call.sub == 'commit':

@@ -143,7 +143,13 @@ project) is left alone; the rest of the same command is not.
   different name or in a separate `tests/` folder is not seen, and that file commits freely.
 - **A script file is not read.** `bash deploy.sh`, `powershell -File x.ps1` and a heredoc fed
   to `python` run code the guards cannot see; script *text* fed to a shell is read.
-- **Git aliases are not resolved.** `git ci` for `commit` is not seen as a commit.
+- **Only aliases in the command itself are resolved** (`git -c alias.ci=commit ci`). An alias
+  from a git config file is not seen: `git ci` stays an unknown subcommand.
+- **A command name computed at run time is not seen** (`& (Get-Command git) add -A`,
+  `$(echo git) add -A`). `Start-Process git -ArgumentList ...` and `xargs git ...` are read;
+  under xargs, `add` and `commit` are refused because their paths arrive at run time.
+- **A command nested too deeply to read is refused** when it mentions git, instead of being
+  let through.
 - **Read-only subagents are recognised by name** (Explore, Plan, claude-code-guide). Whether
   such a subagent gets a shell in Plan Mode, and whether its own calls carry `plan`, depends on
   the Claude Code version; measure before relying on it.
@@ -173,8 +179,8 @@ python hooks/test_plan_gate.py --self-test
 
 | Suite | Checks | Mutations |
 |---|---|---|
-| scoped-commit | 86 | 2 |
-| commit-test-gate | 84 | 22 |
+| scoped-commit | 97 | 2 |
+| commit-test-gate | 85 | 22 |
 | plan-gate | 44 | 8 |
 
 Counts on Windows; a few checks for Windows-only spellings (8.3 names, `\\?\`, admin shares,

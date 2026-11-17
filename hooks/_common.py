@@ -410,11 +410,16 @@ class _Lexer:
         return self.events
 
 
+class TooComplex(Exception):
+    """The command nests deeper than the lexer can follow. The guards refuse such a command
+    when it mentions git: what cannot be read does not go through."""
+
+
 def lex(text, shell='bash'):
     try:
         return _Lexer(text, shell).run()
     except RecursionError:
-        return []
+        raise TooComplex()
 
 
 def _base(word):
@@ -441,8 +446,9 @@ def command_word(tokens):
     return ''
 
 
-def _strip_wrappers(tokens):
-    """(env assignments, remaining tokens) after the wrapper words at the start of a segment."""
+def _strip_wrappers(tokens, via=None):
+    """(env assignments, remaining tokens) after the wrapper words at the start of a segment.
+    Wrapper words seen are added to the set via, when given."""
     env, i = {}, 0
     while i < len(tokens):
         text, quoted = tokens[i]
@@ -453,6 +459,8 @@ def _strip_wrappers(tokens):
             i += 1
             continue
         if not quoted and low in WRAPPERS:
+            if via is not None:
+                via.add(low)
             i += 1
             while i < len(tokens) and tokens[i][0].startswith('-') and low in ('sudo', 'env',
                                                                              'xargs', 'nice'):
@@ -467,6 +475,8 @@ def _shell_text(words):
     word = _base(words[0][0])
     rest = words[1:]
     if word in EVAL_WORDS:
+        if rest and re.match(r'^-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?$', rest[0][0], re.I):
+            rest = rest[1:]
         return None, ' '.join(t for t, _ in rest)
     if word in PS_SHELLS:
         k = 0
@@ -529,13 +539,46 @@ def _literal(text):
     return not re.search(r'[$%*?`]', text)
 
 
+def _start_process(words):
+    """PowerShell Start-Process git -ArgumentList ...: the git arguments as tokens, or None."""
+    if _base(words[0][0]) not in ('start-process', 'saps', 'start'):
+        return None
+    path, arglist, k = None, [], 1
+    while k < len(words):
+        t = words[k][0]
+        low = t.lower()
+        if low in ('-filepath', '-path') and k + 1 < len(words):
+            path = words[k + 1][0]
+            k += 2
+            continue
+        if low in ('-argumentlist', '-args') and k + 1 < len(words):
+            k += 1
+            while k < len(words) and not words[k][0].startswith('-'):
+                arglist.append(words[k][0])
+                k += 1
+            continue
+        if not t.startswith('-') and path is None:
+            path = t
+        elif not t.startswith('-') and path is not None:
+            arglist.append(t)
+        k += 1
+    if not path or _base(path) != 'git':
+        return None
+    out = []
+    for a in arglist:
+        for part in a.split(','):
+            out += [(p, False) for p in part.split()]
+    return out
+
+
 class GitCall:
-    def __init__(self, sub, args, dirs, in_project, base):
+    def __init__(self, sub, args, dirs, in_project, base, hidden_args=False):
         self.sub = sub              # subcommand as written, lower-cased
         self.args = args            # tokens after the subcommand
         self.dirs = dirs            # possible working directories (UNKNOWN allowed)
         self.in_project = in_project
         self.base = base            # directory to resolve relative paths against
+        self.hidden_args = hidden_args  # more arguments arrive at run time (xargs)
 
     def text(self):
         return ('git %s %s' % (self.sub, ' '.join(t for t, _ in self.args))).strip()
@@ -566,7 +609,8 @@ def git_calls(cmd, project, cwd=None, shell='bash'):
             segment(ev[1], sh)
 
     def segment(tokens, sh):
-        env, words = _strip_wrappers(tokens)
+        via = set()
+        env, words = _strip_wrappers(tokens, via)
         if not words:
             # `export GIT_DIR=x`-style persistence is handled below; a bare assignment in
             # bash persists for the rest of the command too.
@@ -610,16 +654,21 @@ def git_calls(cmd, project, cwd=None, shell='bash'):
             walk(lex(script, sub_shell or sh), sub_shell or sh)
             state['dirs'] = stack.pop() | state['dirs']
             return
+        started = _start_process(words)
+        if started is not None:
+            git_call(env, started, sh)
+            return
         if word != 'git':
             return
-        git_call(env, words[1:])
+        git_call(env, words[1:], sh, 'xargs' in via)
 
-    def git_call(env, rest):
+    def git_call(env, rest, sh='bash', hidden=False):
         dirs = set(state['dirs'])
         allenv = dict(state['env'])
         allenv.update(env)
         git_dir = allenv.get('GIT_DIR')
         work_tree = allenv.get('GIT_WORK_TREE')
+        aliases = {}                # git -c alias.NAME=VALUE on this call
         i = 0
         while i < len(rest):
             t = rest[i][0]
@@ -629,6 +678,9 @@ def git_calls(cmd, project, cwd=None, shell='bash'):
                 i += 2
                 continue
             if t == '-c' and i + 1 < len(rest):
+                m = re.match(r'^alias\.([^=]+)=(.*)$', rest[i + 1][0], re.S)
+                if m:
+                    aliases[m.group(1).lower()] = m.group(2)
                 i += 2
                 continue
             m = re.match(r'^--(git-dir|work-tree|namespace|super-prefix|config-env|exec-path)'
@@ -652,6 +704,15 @@ def git_calls(cmd, project, cwd=None, shell='bash'):
             return
         sub = rest[i][0].lower()
         args = rest[i + 1:]
+        if sub in aliases:
+            value = aliases.pop(sub)
+            if value.startswith('!'):
+                # A shell alias: its text runs as a command, with the call's arguments after.
+                walk(lex(value[1:] + ' ' + ' '.join(t for t, _ in args), sh), sh)
+                return
+            expanded = [(p, False) for p in value.split()]
+            if expanded:
+                sub, args = expanded[0][0].lower(), expanded[1:] + list(args)
 
         def where(spec):
             if not spec or not _literal(spec):
@@ -663,9 +724,12 @@ def git_calls(cmd, project, cwd=None, shell='bash'):
         inside = any(d is UNKNOWN or is_within(d, project) for d in repo)
         known = [d for d in dirs if d is not UNKNOWN and is_within(d, project)]
         base = known[0] if known else start
-        calls.append(GitCall(sub, args, dirs, inside, base))
+        calls.append(GitCall(sub, args, dirs, inside, base, hidden))
 
-    walk(lex(cmd, shell), shell)
+    try:
+        walk(lex(cmd, shell), shell)
+    except RecursionError:
+        raise TooComplex()
     return calls
 
 

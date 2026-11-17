@@ -171,6 +171,7 @@ GATE = [
     ('H03-then', 'start', lambda: None, 'if true; then %s; fi' % COMMIT_FOO, 'deny'),
     ('H03-command', 'start', lambda: None, 'command ' + COMMIT_FOO, 'deny'),
     ('H03-env', 'start', lambda: None, 'env ' + COMMIT_FOO, 'deny'),
+    ('X-deep-nesting', 'toodeep', lambda: None, '$(' * 600 + COMMIT_FOO + ')' * 600, 'deny'),
     ('H04-heredoc-bash', 'shell-text', lambda: None, "bash <<'EOF'\n%s\nEOF" % COMMIT_FOO, 'deny'),
     ('H04-bash-c', 'shell-text', lambda: None, "bash -c '%s'" % COMMIT_FOO, 'deny'),
     ('allow-green-same-content', '', lambda: set_green(TEST_FOO, FOO), COMMIT_FOO, 'allow'),
