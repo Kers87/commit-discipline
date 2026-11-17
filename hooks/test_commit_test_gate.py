@@ -17,7 +17,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _testlib import HERE, Report, mutated_copy, run_hook  # noqa: E402
 
 HOOK = os.path.join(HERE, 'commit_test_gate.py')
-ROOT = tempfile.mkdtemp(prefix='cd-gate-')
+# The hook keeps paths in their canonical form (realpath): long names instead of 8.3 names on
+# Windows (C:\Users\RUNNER~1 on CI), /private/var instead of /var on macOS. This test writes
+# evidence lines itself, so it uses the same form.
+ROOT = os.path.realpath(tempfile.mkdtemp(prefix='cd-gate-'))
 PROJ = os.path.join(ROOT, 'project')
 STATE = os.path.join(ROOT, 'state')
 OTHER = os.path.join(ROOT, 'other')
