@@ -5,6 +5,7 @@ Run:  python hooks/test_scoped_commit.py
 """
 
 import os
+import re
 import sys
 import tempfile
 
@@ -17,6 +18,16 @@ OTHER = tempfile.mkdtemp(prefix='cd-other-')
 P = PROJ.replace('\\', '/')
 O = OTHER.replace('\\', '/')
 ENV = {'CLAUDE_PROJECT_DIR': PROJ}
+
+
+def msys(path):
+    """C:/x/y -> /c/x/y (Git Bash form); None off Windows."""
+    if os.name != 'nt' or not re.match(r'^[A-Za-z]:', path):
+        return None
+    return '/' + path[0].lower() + path[2:].replace(chr(92), '/')
+
+
+MP, MO = msys(PROJ), msys(OTHER)
 
 # name, command, expected
 CASES = [
@@ -65,18 +76,96 @@ CASES = [
     # allow: deliberate escape hatch
     ('allow-marker-add', 'git add -A   # scope-ok: deliberate sync catch-up', 'allow'),
     ('allow-marker-commit', 'git commit -m "sync up to today" # scope-ok: catch-up', 'allow'),
+    # c-940 / 0.1.2: H-01, a cd or -C to another repo only covers its own segments
+    ('H01-cd-after-add', 'git add -A; cd %s' % O, 'deny'),
+    ('H01-cd-after-commit', 'git commit -m x; cd %s' % O, 'deny'),
+    ('H01-two-repos', 'cd %s && git status; cd %s && git commit -am x' % (O, P), 'deny'),
+    ('H01-C-other-then-bare', 'git -C %s status; git add -A' % O, 'deny'),
+    ('H01-cd-back', 'cd %s; cd %s; git add -A' % (O, P), 'deny'),
+    ('H01-subshell', '(cd %s && git commit -am x); git add -A' % O, 'deny'),
+    ('H01-block-union', 'cd %s; { cd %s; }; git add -A' % (O, P), 'deny'),
+    ('H01-C-relative-other', 'git -C %s/.. -C %s commit -am x' % (P, O), 'allow'),
+    # H-03: start positions
+    ('H03-env-prefix', 'X=1 git add -A', 'deny'),
+    ('H03-git-editor', 'GIT_EDITOR=true git commit -m x', 'deny'),
+    ('H03-then', 'if true; then git add -A; fi', 'deny'),
+    ('H03-do', 'for f in a; do git add .; done', 'deny'),
+    ('H03-command', 'command git add -A', 'deny'),
+    ('H03-env', 'env git commit -am x', 'deny'),
+    ('H03-subst', 'echo $(git add -A)', 'deny'),
+    ('H03-backtick', 'echo `git add -A`', 'deny'),
+    ('H03-bang', '! git commit -am x', 'deny'),
+    ('H03-ps-call', '& git commit -m x', 'deny'),
+    # H-04: script text that goes to a shell is a command, not documentation
+    ('H04-heredoc-bash', "bash <<'EOF'\ngit add -A\nEOF", 'deny'),
+    ('H04-sh-c', "sh -c 'git add -A'", 'deny'),
+    ('H04-bash-c', 'bash -c "git commit -am x"', 'deny'),
+    ('H04-ps-command', 'powershell -NoProfile -Command "git add -A"', 'deny'),
+    ('H04-eval', 'eval "git add ."', 'deny'),
+    ('H04-cat-heredoc-msg', "git commit -m \"$(cat <<'EOF'\nnote: git add -A\nEOF\n)\" -- README.md", 'allow'),
+    # H-05: other spellings of the same call
+    ('H05-stage', 'git stage -A', 'deny'),
+    ('H05-no-pager-commit', 'git --no-pager commit -am x', 'deny'),
+    ('H05-no-pager-add', 'git --no-pager add -A', 'deny'),
+    ('H05-amend-abbrev', 'git commit --amen -m x -- a.md', 'deny'),
+    ('H05-amend-abbrev2', 'git commit --am -m x -- a.md', 'deny'),
+    ('H05-no-pager-amend', 'git --no-pager commit --amend -m x -- a.md', 'deny'),
+    ('H05-add-al', 'git add --al', 'deny'),
+    ('H05-add-upd', 'git add --upd', 'deny'),
+    ('H05-add-cluster', 'git add -vA', 'deny'),
+    ('H05-commit-include', 'git commit -i -m x -- a.md', 'deny'),
+    ('H05-git-dir', 'cd %s; git --git-dir=%s/.git --work-tree=%s add -A' % (O, P, P), 'deny'),
+    ('H05-msg-glued', 'git commit -mfix -- a.md', 'allow'),
+    ('H05-author', 'git commit --author=x -m y -- a.md', 'allow'),
+    # H-06: path lists that mean the whole tree
+    ('H06-add-dot-slash', 'git add ./', 'deny'),
+    ('H06-add-top', 'git add :/', 'deny'),
+    ('H06-add-star', 'git add *', 'deny'),
+    ('H06-commit-dot', 'git commit -m x -- .', 'deny'),
+    ('H06-commit-top-magic', "git commit -m x -- ':(top)'", 'deny'),
+    ('H06-commit-glob', "git commit -m x -- '*.md'", 'deny'),
+    ('H06-commit-project-abs', 'git commit -m x -- %s' % P, 'deny'),
+    ('H06-add-dir', 'git add scripts/', 'allow'),
+    ('H06-commit-dir', 'git commit -m x -- scripts', 'allow'),
+    ('H06-add-dashdash', 'git add -- scripts/foo.py', 'allow'),
+    # 0.1.2 own second read: nesting too deep to read must not open the gate
+    ('X-deep-nesting', '$(' * 600 + 'git add -A' + ')' * 600, 'deny'),
+    ('X-deep-quoted', '"$(' * 5000 + 'git add -A', 'deny'),
+    ('X-deep-no-git', '$(' * 600 + 'echo hi' + ')' * 600, 'allow'),
     # allow: fail open
     ('allow-empty-command', '', 'allow'),
+]
+if MP:  # Git Bash spelling of the same directories
+    CASES += [
+        ('H01-msys-project', 'cd %s && git commit -am x' % MP, 'deny'),
+        ('H01-msys-other', 'cd %s && git commit -am x' % MO, 'allow'),
+    ]
+
+
+CASES += [
+    ('X-alias-c', 'git -c alias.ci=commit ci -am x', 'deny'),
+    ('X-alias-c-shell', "git -c alias.go='!git add -A' go", 'deny'),
+    ('X-xargs-add', 'echo . | xargs git add', 'deny'),
+    ('X-xargs-commit', 'ls | xargs git commit -m x --', 'deny'),
+    ('PS:X-iex-command', 'Invoke-Expression -Command "git add -A"', 'deny'),
+    ('PS:X-start-process', 'Start-Process git -ArgumentList "add -A"', 'deny'),
+    ('PS:X-start-process-list', "Start-Process -FilePath git -ArgumentList 'commit','-am','x'", 'deny'),
+    ('PS:X-start-process-ok', 'Start-Process git -ArgumentList "status"', 'allow'),
 ]
 
 
 def payload(cmd):
-    return {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': cmd}}
+    tool = 'Bash'
+    if cmd.startswith('PS:'):
+        tool, cmd = 'PowerShell', cmd[3:]
+    return {'hook_event_name': 'PreToolUse', 'tool_name': tool, 'tool_input': {'command': cmd}}
 
 
 def main():
     r = Report('scoped-commit: %d checks' % len(CASES))
     for name, cmd, want in CASES:
+        if name.startswith('PS:'):
+            name, cmd = name[3:], 'PS:' + cmd
         got = run_hook(HOOK, payload(cmd), ENV)
         r.check(name, got == want, got if got != want else '')
     got = run_hook(HOOK, 'this is not json', ENV)
@@ -95,7 +184,8 @@ def main():
             if broken is None:
                 r.check('self-test %s' % mname, False, 'mutation anchor not found')
                 continue
-            flipped = sum(run_hook(broken, payload(c[1]), ENV) == 'allow' for c in denies)
+            flipped = sum(run_hook(broken, payload(('PS:' if c[0].startswith('PS:') else '') + c[1]),
+                                   ENV) == 'allow' for c in denies)
             r.check('self-test %s' % mname, flipped == len(denies),
                     '%d of %d deny checks turned red' % (flipped, len(denies)))
     r.finish()

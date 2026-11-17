@@ -10,6 +10,14 @@ PostToolUse - record a green test.
   Recognised: python tests/test_x.py, powershell ... -File test-x.ps1, & "path/test-x.ps1".
   Flags: only --self-test (python) or -SelfTest (PowerShell). Any other flag does not count:
   --help also exits 0 without testing anything.
+  Since 0.1.2 the call must also really run the test:
+  - interpreter flags only from -I -B -u -E -s -S (and py -3.x); -V, -h, -O, -c, -m do not
+    count, because they exit 0 without running the test or strip its asserts;
+  - the interpreter is a bare python/python3/py, or one inside a venv (pyvenv.cfg next to its
+    Scripts or bin folder); a file named python anywhere else can be anything that exits 0;
+  - an env prefix only with variables from SAFE_ENV (PATH, PYTHONPATH, PYTHONOPTIMIZE and the
+    like change what runs);
+  - not started in the background (run_in_background exits 0 before the test ran).
   Recorded: sha256 of the test file AND of its source file (test_name.py -> name.py,
   test-name.ps1 -> name.ps1, same directory).
   Not measured: whether the test is any good. A weakened test passes too; a self-test that
@@ -19,6 +27,9 @@ PreToolUse rule 1 - a git commit of a file that has its OWN test file only goes 
   there is a green run with EXACTLY the current content of file and test. Content hash, not
   mtime: an mtime can be set back with one line.
   A file without a test file passes: what cannot be measured is not demanded.
+  A path list item that is not a plain file (a directory, a glob, :/ or other pathspec magic)
+  is expanded by asking git which tracked files under it differ from HEAD (0.1.2); before,
+  such an item was skipped and `-- scripts` committed tested files without evidence.
   A commit the guard cannot parse (no -- path list, --pathspec-from-file) is refused: what
   cannot be seen does not go through.
   No escape hatch for the model. Committing without a test is for the human, from their own
@@ -32,20 +43,33 @@ State: <state dir>/green-tests.tsv, one TAB-separated line per green run:
 
 import os
 import re
+import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (HEREDOC, deny, is_within, norm, project_dir, read_input,  # noqa: E402
-                     sha256, state_dir, targets_other_repo)
+from _common import (COMMIT_ATTACHED_SHORT, COMMIT_VALUE_LONG, COMMIT_VALUE_SHORT,  # noqa: E402
+                     TOO_DEEP, TooComplex, _literal, braces, deny, deny_too_deep, git_calls,
+                     is_within, mentions_git, norm, project_dir, read_input, sha256, shell_of,
+                     split_args, state_dir)
 
 MARKER = 'green-tests.tsv'
 
-ENVPRE = r'(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|<>]+\s+)*'
+# Environment a test run may carry: variables that change output, not which code runs.
+# PATH, PYTHONPATH, PYTHONHOME, PYTHONOPTIMIZE and the like decide WHAT runs.
+SAFE_ENV = {'PYTHONIOENCODING', 'PYTHONUTF8', 'PYTHONUNBUFFERED', 'PYTHONDONTWRITEBYTECODE',
+            'PYTHONHASHSEED', 'PYTHONWARNINGS', 'PYTHONFAULTHANDLER', 'LANG', 'LC_ALL',
+            'LC_CTYPE', 'NO_COLOR', 'FORCE_COLOR', 'TERM', 'COLUMNS', 'TZ', 'CI'}
+ENVPRE = r'(?P<env>(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|<>]+\s+)*)'
+# Interpreter flags that leave the test as it is: -V and -h exit 0 without running anything,
+# -O strips every assert, -c and -m run something else, -i turns a failing exit into 0.
+# Only these letters count, case-sensitive.
+PYFLAGS = r'(?:(?-i:-[IBbuEsS]+)\s+)*'
 FLAGS_PY = r'(?P<args>(?:\s+--self-test)?)'
 FLAGS_PS = r'(?P<args>(?:\s+-SelfTest)?)'
 FORMS = [re.compile(p, re.I) for p in (
-    r'^' + ENVPRE + r'(?:[^\s;&|<>]*[\\/])?(?:python3?|py)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*'
+    r'^' + ENVPRE + r'(?P<interp>(?:[^\s;&|<>]*[\\/])?(?:python(?:3(?:\.[0-9]+)?)?|py)(?:\.exe)?)\s+'
+    r'(?:-3(?:\.[0-9]+)?(?:-(?:32|64))?\s+)?' + PYFLAGS +
     r'"?(?P<path>[^"\s;&|<>]*test_[A-Za-z0-9_]+\.py)"?' + FLAGS_PY + r'\s*$',
     r'^(?:&\s*)?(?:powershell|pwsh)(?:\.exe)?\s+'
     r'(?:-(?:NoProfile|NonInteractive|NoLogo)\s+|-ExecutionPolicy\s+\w+\s+)*'
@@ -53,14 +77,12 @@ FORMS = [re.compile(p, re.I) for p in (
     r'^(?:&\s*|\.\s+)?"?(?P<path>[^"\s;&|<>]*test-[A-Za-z0-9_-]+\.ps1)"?' + FLAGS_PS + r'\s*$',
 )]
 
-GIT = r'(?i:(?:&\s*)?(?:[^\s;&|]*[\\/])?git(?:\.exe)?)'
-GITOPT = r'(?:\s+-[Cc]\s+\S+|\s+--[A-Za-z][\w-]*(?:=\S+)?)*'
-# A commit inside { } or ( ) counts too (an if-block or a subexpression).
-START = r'(?:^|\n|;|&&|\|\||\||\{|\()\s*(?:sudo\s+)?' + GIT + GITOPT + r'\s+'
-
 WRITES = re.compile(r'(?i)(Set-Content|Add-Content|Out-File|New-Item|Remove-Item|Copy-Item|'
-                    r'Move-Item|Clear-Content|WriteAll|AppendAll|\btee\b|\bcp\b|\bmv\b|\brm\b|'
-                    r'\btouch\b|sed\s+-i|(?<![0-9-])>)')
+                    r'Move-Item|Rename-Item|Clear-Content|WriteAll|AppendAll|\btee\b|\bcp\b|'
+                    r'\bmv\b|\brm\b|\bcopy\b|\bmove\b|\bdel\b|\berase\b|\bren\b|\bcpi\b|\bmi\b|'
+                    r'\bri\b|\brni\b|\bni\b|\bac\b|\bsc\b|\bclc\b|\bln\b|\bdd\b|\binstall\b|'
+                    r'\btruncate\b|\brmdir\b|mklink|fsutil|robocopy|xcopy|\btouch\b|sed\s+-i|'
+                    r'open\s*\(|write_text|write_bytes|shutil|(?<![0-9-])>)')
 
 
 def source_of(test):
@@ -71,14 +93,38 @@ def source_of(test):
 
 
 def test_of(path):
-    """name.py -> test_name.py, name.ps1 -> test-name.ps1; None for test files themselves."""
+    """name.py -> test_name.py, name.ps1 -> test-name.ps1 (same directory). A source whose
+    own name starts with test_ has a test too: test_helpers.py -> test_test_helpers.py."""
     d, name = os.path.split(path)
     stem, ext = os.path.splitext(name)
-    if ext.lower() == '.py' and not name.lower().startswith('test_'):
+    if ext.lower() == '.py':
         return os.path.join(d, 'test_' + stem + '.py')
-    if ext.lower() == '.ps1' and not name.lower().startswith('test-'):
+    if ext.lower() == '.ps1':
         return os.path.join(d, 'test-' + stem + '.ps1')
     return None
+
+
+def trusted_python(m, cwd):
+    """True when the matched test call runs a real Python on the test (H-08).
+
+    The environment prefix may only carry SAFE_ENV variables. The interpreter is a bare name
+    (python, python3, py, found on PATH) or one inside a virtual environment: <venv>/Scripts or
+    <venv>/bin with a pyvenv.cfg in <venv>. A file named python in a folder of its own does
+    not count: it can be anything that exits 0.
+    """
+    for assign in (m.group('env') or '').split():
+        if assign.split('=', 1)[0].upper() not in SAFE_ENV:
+            return False
+    interp = m.group('interp')
+    if not re.search(r'[\\/]', interp):
+        return True
+    full = norm(interp, base=cwd)
+    if not full or not os.path.isfile(full):
+        return False
+    bindir = os.path.dirname(full)
+    venv = os.path.dirname(bindir)
+    return (os.path.basename(bindir).lower() in ('scripts', 'bin')
+            and os.path.isfile(os.path.join(venv, 'pyvenv.cfg')))
 
 
 def record(data, cmd, project, tsv):
@@ -87,18 +133,24 @@ def record(data, cmd, project, tsv):
         return
     if (data.get('tool_response') or {}).get('interrupted') is True:
         return
+    # A background start exits 0 at once, before the test has run (H-09).
+    if (data.get('tool_input') or {}).get('run_in_background'):
+        return
     bare = cmd.strip()
     if '\n' in bare or '\r' in bare:
         return
+    cwd = norm(data.get('cwd')) or project
     path = None
     for form in FORMS:
         m = form.match(bare)
         if m:
+            if 'interp' in m.groupdict() and not trusted_python(m, cwd):
+                return
             path = m.group('path')
             break
     if not path:
         return
-    full = norm(path, base=norm(data.get('cwd')) or project)
+    full = norm(path, base=cwd)
     if not is_within(full, project) or not os.path.isfile(full):
         return
     src = source_of(full)
@@ -110,36 +162,75 @@ def record(data, cmd, project, tsv):
         f.write(line + '\n')
 
 
+def changed_files(base, specs):
+    """The files a `git commit -- <specs>` takes along, asked from git itself (H-02): the
+    tracked files under those pathspecs that differ from HEAD. None when git cannot tell (no
+    git, no HEAD, a bad pathspec): the caller then refuses, because what cannot be seen does
+    not go through."""
+    try:
+        top = subprocess.run(['git', '-C', base, 'rev-parse', '--show-toplevel'],
+                             capture_output=True, timeout=10)
+        diff = subprocess.run(['git', '-C', base, '-c', 'core.quotepath=off', 'diff',
+                               '--name-only', '-z', '--no-renames', 'HEAD', '--'] + specs,
+                              capture_output=True, timeout=20)
+    except Exception:
+        return None
+    if top.returncode != 0 or diff.returncode != 0:
+        return None
+    root = top.stdout.decode('utf-8', 'replace').strip()
+    names = [n for n in diff.stdout.decode('utf-8', 'replace').split('\0') if n]
+    return [norm(os.path.join(root, n)) for n in names]
+
+
+def commit_files(call, project):
+    """The files one commit call takes along, or None when that cannot be seen."""
+    opts, specs, dd = split_args(call.args, COMMIT_VALUE_SHORT, COMMIT_VALUE_LONG,
+                                 COMMIT_ATTACHED_SHORT)
+    if any(o.startswith('--pathspec-f') for o in opts) or not dd or not specs \
+            or call.hidden_args:
+        return None
+    files, expand = [], {}
+    for written, _ in specs:
+        for t in braces(written):
+            if not _literal(t) and not re.search(r'[*?]', t):
+                return None             # a path known only at run time ($PWD, $(...))
+            plain = not t.startswith(':') and not re.search(r'[*?\[]', t)
+            if plain and call.unknown_dir and not re.match(r'^(?:[A-Za-z]:[\\/]|[\\/]|~)', t):
+                return None             # relative to a directory known only at run time
+            for b in call.bases:
+                full = norm(t, base=b)
+                if plain and full and os.path.isfile(full):
+                    files.append((written, full))
+                elif plain and full and not os.path.exists(full):
+                    continue            # a deleted file: nothing to test
+                else:
+                    expand.setdefault(b, []).append(t)  # a directory, a glob, pathspec magic
+        if expand:
+            for b, ts in sorted(expand.items()):
+                changed = changed_files(b, ts)
+                if changed is None:
+                    return None
+                files += [(os.path.relpath(f, project), f) for f in changed]
+            expand = {}
+    return files
+
+
 def check_commit(data, cmd, project, tsv):
     """PreToolUse rule 1: every committed file with a test file needs a matching green run."""
-    s = HEREDOC.sub(' ', cmd)
-    s = re.sub(r'(?:-m|--message)(?:\s+|=)"[^"]*"', ' ', s)
-    s = re.sub(r"(?:-m|--message)(?:\s+|=)'[^']*'", ' ', s)
-    s = re.sub(r'(?:-F|--file)(?:\s+|=)\S+', ' ', s)
-    s = s.replace('"', '').replace("'", '')
+    calls = [c for c in git_calls(cmd, project, norm(data.get('cwd')), shell_of(data))
+             if c.in_project and c.sub == 'commit']
 
-    other, base = targets_other_repo(s, project, case_sensitive_C=True)
-    if other:
-        return
-    if not base:
-        cwd = norm(data.get('cwd'))
-        base = cwd if is_within(cwd, project) else project
-
-    paths, unreadable = [], []
-    for m in re.finditer(START + r'(?i:commit)(?=\s|$)([^\n;&|]*)', s):
-        rest = m.group(1)
-        if re.search(r'(?i)--pathspec-from-file', rest):
-            unreadable.append(m.group(0).strip())
-            continue
-        pm = re.search(r'\s--\s+(.+)$', rest)
-        if pm:
-            paths += [p.rstrip(')}') for p in pm.group(1).strip().split() if p.rstrip(')}')]
+    files, unreadable = [], []          # files: (as written, canonical path, call)
+    for call in calls:
+        got = commit_files(call, project)
+        if got is None:
+            unreadable.append(call.text())
         else:
-            unreadable.append(m.group(0).strip())
+            files += [(p, f, call) for p, f in got]
     if unreadable:
         deny("commit-test-gate: cannot see which files this commit takes along ('%s'). Use "
              'git commit -m "..." -- <paths>.' % "'; '".join(unreadable))
-    if not paths:
+    if not files:
         return
 
     good, seen = set(), set()
@@ -151,13 +242,18 @@ def check_commit(data, cmd, project, tsv):
                     seen.add(d[0])
                     good.add((d[0], d[3], d[4], d[5]))
 
-    blocked = []
-    for p in paths:
-        full = norm(p, base=base)
+    blocked, changing = [], []
+    for p, full, call in files:
         if not is_within(full, project) or not os.path.isfile(full):
             continue
         test = test_of(full)
         if not test or not os.path.isfile(test):
+            continue
+        # An earlier command in the same line may change the file or its test after this
+        # check and before the commit: then the green run proves nothing about what is
+        # committed (S-01 of the 0.1.2 slooppas).
+        if any(t and (t == full or t == test or is_within(full, t)) for t in call.touched):
+            changing.append(p)
             continue
         rel = os.path.relpath(test, project)
         if (test, sha256(test), full, sha256(full)) in good:
@@ -166,6 +262,11 @@ def check_commit(data, cmd, project, tsv):
             blocked.append('%s (file or test changed since the last green run of %s)' % (p, rel))
         else:
             blocked.append('%s (test %s has not run green yet)' % (p, rel))
+    if changing:
+        deny('commit-test-gate: refused for %s. An earlier command in the same line may change '
+             'it before the commit, so its green run says nothing about what is committed. '
+             'Run that command, then the test, then commit, as separate calls.'
+             % '; '.join(changing))
     if blocked:
         deny('commit-test-gate: refused for %s. Run the test green first as a bare command, '
              'without chaining, redirects or flags other than --self-test / -SelfTest (e.g. '
@@ -175,6 +276,8 @@ def check_commit(data, cmd, project, tsv):
 
 def main():
     data = read_input()
+    if data is TOO_DEEP:
+        deny_too_deep()
     if data is None:
         return
     event = data.get('hook_event_name')
@@ -198,12 +301,20 @@ def main():
         deny('commit-test-gate: this command writes to %s. That file is the evidence of green '
              'test runs; only the hook itself writes it.' % MARKER)
 
-    # Rule 1.
+    # Rule 1. A command that names a commit but cannot be read is refused.
     try:
         check_commit(data, cmd, project, tsv)
     except SystemExit:
         raise
+    except TooComplex:
+        if mentions_git(cmd):
+            deny('commit-test-gate: the command nests too deeply to see which files a commit '
+                 'takes along. Split it into plain commands.')
+        return
     except Exception:
+        if mentions_git(cmd) and re.search(r'(?i)commit', re.sub(r'[\'"`\\^]', '', cmd)):
+            deny('commit-test-gate: the command could not be read. Split it into plain '
+                 'commands.')
         return
 
 

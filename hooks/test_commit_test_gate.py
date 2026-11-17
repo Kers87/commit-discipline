@@ -8,6 +8,7 @@ Works in a throwaway project and state dir under the system temp dir.
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -16,7 +17,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _testlib import HERE, Report, mutated_copy, run_hook  # noqa: E402
 
 HOOK = os.path.join(HERE, 'commit_test_gate.py')
-ROOT = tempfile.mkdtemp(prefix='cd-gate-')
+# The hook keeps paths in their canonical form (realpath): long names instead of 8.3 names on
+# Windows (C:\Users\RUNNER~1 on CI), /private/var instead of /var on macOS. This test writes
+# evidence lines itself, so it uses the same form.
+ROOT = os.path.realpath(tempfile.mkdtemp(prefix='cd-gate-'))
 PROJ = os.path.join(ROOT, 'project')
 STATE = os.path.join(ROOT, 'state')
 OTHER = os.path.join(ROOT, 'other')
@@ -43,6 +47,44 @@ OUTSIDE_TEST = os.path.join(OTHER, 'test_foo.py')
 def write(path, text):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(text)
+
+
+def fwd(path):
+    return path.replace(os.sep, '/')
+
+
+def git(*args):
+    subprocess.run(['git', '-C', PROJ] + list(args), check=True, capture_output=True)
+
+
+# The project is a real git repository with every file committed as 'x', so a path list that
+# names a directory or a pathspec can be expanded to the files that actually changed.
+for f in ALL:
+    write(f, 'x')
+git('init', '-q')
+git('config', 'user.email', 'test@example.invalid')
+git('config', 'user.name', 'test')
+git('config', 'commit.gpgsign', 'false')
+git('add', '--', 'scripts', 'tools')
+git('commit', '-q', '-m', 'init', '--', 'scripts', 'tools')
+
+# A fake interpreter outside any venv (H-08) and a venv interpreter (allowed).
+FAKE_PY = os.path.join(ROOT, 'nep', 'python')
+VENV_PY = os.path.join(ROOT, 'venv', 'Scripts', 'python.exe')
+for f in (FAKE_PY, VENV_PY):
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    write(f, 'x')
+write(os.path.join(ROOT, 'venv', 'pyvenv.cfg'), 'home = x')
+
+
+def short_name(path):
+    """8.3 form of an existing path on Windows, or None."""
+    if os.name != 'nt':
+        return None
+    import ctypes
+    buf = ctypes.create_unicode_buffer(1024)
+    n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, 1024)
+    return buf.value if n and buf.value.lower() != path.lower() else None
 
 
 def sha(path):
@@ -76,9 +118,12 @@ def pre(cmd):
             'tool_input': {'command': cmd}}
 
 
-def post(cmd, event='PostToolUse', interrupted=False):
+def post(cmd, event='PostToolUse', interrupted=False, background=False):
+    tinput = {'command': cmd}
+    if background:
+        tinput['run_in_background'] = True
     return {'hook_event_name': event, 'tool_name': 'Bash', 'cwd': PROJ, 'session_id': 'test',
-            'tool_input': {'command': cmd},
+            'tool_input': tinput,
             'tool_response': {'stdout': 'ok', 'stderr': '', 'interrupted': interrupted}}
 
 
@@ -113,6 +158,25 @@ GATE = [
     ('deny-state-set-content', 'state', lambda: None,
      'Set-Content %s/green-tests.tsv "x"' % STATE_FWD, 'deny'),
     ('deny-state-echo', 'state', lambda: None, 'echo x >> %s/green-tests.tsv' % STATE_FWD, 'deny'),
+    # c-940 / 0.1.2
+    ('H01-cd-other-after', 'segment', lambda: None, COMMIT_FOO + '; cd %s' % fwd(OTHER), 'deny'),
+    ('H01-cd-other-before-C-project', 'segment-C', lambda: None,
+     'cd %s; git -C %s commit -m "x" -- scripts/foo.py' % (fwd(OTHER), fwd(PROJ)), 'deny'),
+    ('H02-dir', 'expand', lambda: change(FOO), 'git commit -m "x" -- scripts', 'deny'),
+    ('H02-dir-slash', 'expand', lambda: change(FOO), 'git commit -m "x" -- scripts/', 'deny'),
+    ('H02-dot', 'expand', lambda: change(FOO), 'git commit -m "x" -- .', 'deny'),
+    ('H02-glob', 'expand', lambda: change(FOO), "git commit -m \"x\" -- 'scripts/*.py'", 'deny'),
+    ('H02-top-magic', 'expand', lambda: change(FOO), 'git commit -m "x" -- :/scripts/foo.py', 'deny'),
+    ('H02-dir-green', '', lambda: (change(FOO), set_green(TEST_FOO, FOO)), 'git commit -m "x" -- scripts', 'allow'),
+    ('H02-dir-unchanged', '', lambda: None, 'git commit -m "x" -- scripts', 'allow'),
+    ('H02-dir-only-loose', '', lambda: change(LOOSE), 'git commit -m "x" -- scripts', 'allow'),
+    ('H03-env-prefix', 'envprefix', lambda: None, 'X=1 ' + COMMIT_FOO, 'deny'),
+    ('H03-then', 'start', lambda: None, 'if true; then %s; fi' % COMMIT_FOO, 'deny'),
+    ('H03-command', 'start', lambda: None, 'command ' + COMMIT_FOO, 'deny'),
+    ('H03-env', 'start', lambda: None, 'env ' + COMMIT_FOO, 'deny'),
+    ('X-deep-nesting', 'toodeep', lambda: None, '$(' * 600 + COMMIT_FOO + ')' * 600, 'deny'),
+    ('H04-heredoc-bash', 'shell-text', lambda: None, "bash <<'EOF'\n%s\nEOF" % COMMIT_FOO, 'deny'),
+    ('H04-bash-c', 'shell-text', lambda: None, "bash -c '%s'" % COMMIT_FOO, 'deny'),
     ('allow-green-same-content', '', lambda: set_green(TEST_FOO, FOO), COMMIT_FOO, 'allow'),
     ('allow-newer-mtime-same-content', '',
      lambda: (set_green(TEST_FOO, FOO), set_mtime(FOO, 300)), COMMIT_FOO, 'allow'),
@@ -159,7 +223,25 @@ LOG = [
     ('no-log-missing-file', '', post('python scripts/test_missing.py'), None),
     ('no-log-outside-project', '', post('python %s' % OUTSIDE_TEST.replace('\\', '/')), None),
     ('no-log-no-json', '', 'this is not json', None),
+    # c-940 / 0.1.2
+    ('H07-version-flag', 'iflag', post('python -V scripts/test_foo.py'), None),
+    ('H07-help-flag', 'iflag', post('python -h scripts/test_foo.py'), None),
+    ('H07-optimize', 'iflag', post('python -O scripts/test_foo.py'), None),
+    ('H07-isolated-ok', 'log', post('python -I -B scripts/test_foo.py'), TEST_FOO),
+    ('H07-py-launcher-ok', 'log', post('py -3 scripts/test_foo.py'), TEST_FOO),
+    ('H08-own-python', 'interp', post('%s scripts/test_foo.py' % fwd(FAKE_PY)), None),
+    ('H08-path-env', 'envpre', post('PATH=/tmp/nep python scripts/test_foo.py'), None),
+    ('H08-pythonpath', 'envpre', post('PYTHONPATH=/tmp/x python scripts/test_foo.py'), None),
+    ('H08-pythonoptimize', 'envpre', post('PYTHONOPTIMIZE=1 python scripts/test_foo.py'), None),
+    ('H08-venv-ok', 'log', post('%s scripts/test_foo.py' % fwd(VENV_PY)), TEST_FOO),
+    ('H09-background', 'background', post('python scripts/test_foo.py', background=True), None),
 ]
+
+
+_SHORT = short_name(FOO)
+if _SHORT:  # Windows 8.3 spelling of the source file
+    GATE.append(('H02-short-name', 'shortname', lambda: change(FOO),
+                 'git commit -m "x" -- %s' % fwd(_SHORT), 'deny'))
 
 
 def run_gate(script, case):
@@ -199,19 +281,45 @@ def main():
 
     if '--self-test' in sys.argv[1:]:
         r.section('self-test: break one rule at a time and demand that exactly its checks turn red')
-        gate_groups = ['gate', 'content', 'variant', 'nested', 'nested-paren', 'unreadable', 'state']
+        gate_groups = ['gate', 'content', 'variant', 'nested', 'nested-paren', 'unreadable', 'state',
+                       'segment', 'segment-C', 'expand', 'start', 'envprefix', 'shell-text']
+        if _SHORT:
+            gate_groups.append('shortname')
+        extra = [('no-realpath', 'gate', ['shortname'], '_common.py',
+                  'r = os.path.realpath(p)', 'r = p')] if _SHORT else []
         mutations = [
             ('guard-always-open', 'gate', gate_groups, '_common.py',
              'sys.stdout.write(json.dumps(out))', 'return'),
-            ('nested-blind', 'gate', ['nested', 'nested-paren'], 'commit_test_gate.py',
-             r"START = r'(?:^|\n|;|&&|\|\||\||\{|\()", r"START = r'(?:^|\n|;|&&|\|\||\|)"),
-            ('paren-stays-on-path', 'gate', ['nested-paren'], 'commit_test_gate.py',
-             "p.rstrip(')}') for p in pm.group(1).strip().split() if p.rstrip(')}')",
-             'p for p in pm.group(1).strip().split() if p'),
+            ('nested-blind', 'gate', ['nested', 'nested-paren'], '_common.py',
+             "if c in '(){}':", 'if False:'),
             ('content-ignored', 'gate', ['content'], 'commit_test_gate.py',
              'if (test, sha256(test), full, sha256(full)) in good:', 'if test in seen:'),
-            ('variants-blind', 'gate', ['variant'], 'commit_test_gate.py',
-             r"GIT = r'(?i:(?:&\s*)?(?:[^\s;&|]*[\\/])?git(?:\.exe)?)'", "GIT = r'git'"),
+            ('variants-blind', 'gate', ['variant'], '_common.py',
+             "return w[:-4] if w.endswith('.exe') else w", 'return word'),
+            # 0.1.2 (c-940)
+            ('cd-ends-everything', 'gate', ['segment'], '_common.py',
+             "                state['dirs'] = new\n            return",
+             "                state['dirs'] = new\n                calls[:] = []\n            return"),
+            ('git-C-ignored', 'gate', ['segment-C'], '_common.py',
+             'dirs = _resolve_all(dirs, target) if _literal(target) else dirs | {UNKNOWN}',
+             'dirs = dirs'),
+            ('expansion-off', 'gate', ['expand'], 'commit_test_gate.py',
+             '        if expand:\n', '        if False:\n'),
+            ('wrappers-blind', 'gate', ['start'], '_common.py',
+             "WRAPPERS = {'sudo',", "WRAPPERS = set() and {'sudo',"),
+            ('env-prefix-blind', 'gate', ['envprefix'], '_common.py',
+             "        if not quoted and ASSIGN.match(text):\n            k, v",
+             "        if False:\n            k, v"),
+            ('shell-text-is-documentation', 'gate', ['shell-text'], '_common.py',
+             "SHELLS = {'bash',", "SHELLS = set() and {'bash',"),
+            ('interp-flags-free', 'log', ['iflag'], 'commit_test_gate.py',
+             "PYFLAGS = r'(?:(?-i:-[IBbuEsS]+)\\s+)*'", "PYFLAGS = r'(?:-[A-Za-z]+\\s+)*'"),
+            ('any-python', 'log', ['interp'], 'commit_test_gate.py',
+             "    interp = m.group('interp')\n", '    return True\n'),
+            ('any-env', 'log', ['envpre'], 'commit_test_gate.py',
+             "if assign.split('=', 1)[0].upper() not in SAFE_ENV:", 'if False:'),
+            ('background-counts', 'log', ['background'], 'commit_test_gate.py',
+             "if (data.get('tool_input') or {}).get('run_in_background'):", 'if False:'),
             ('unreadable-allowed', 'gate', ['unreadable'], 'commit_test_gate.py',
              'if unreadable:', 'if False:'),
             ('state-threshold-off', 'gate', ['state'], 'commit_test_gate.py',
@@ -228,7 +336,7 @@ def main():
             ('logger-writes-nothing', 'log', ['log'], 'commit_test_gate.py',
              "f.write(line + '\\n')", 'pass'),
         ]
-        for mname, kind, groups, fname, old, new in mutations:
+        for mname, kind, groups, fname, old, new in mutations + extra:
             tmp, broken = mutated_copy(fname, old, new)
             if broken is None:
                 r.check('self-test %s' % mname, False, 'mutation anchor not found')

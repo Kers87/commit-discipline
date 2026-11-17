@@ -17,7 +17,12 @@ Rule 1 - Plan Mode = research phase, as an ALLOWLIST: read, search and ask only.
   bypassPermissions (measured), while the harness does not enforce the plan restrictions in
   every session setup.
 Rule 2 - in EVERY mode: Write/Edit/NotebookEdit on the guards' state directory is closed. The
-  guards decide on that state; a model that can write it can open its own gate.
+  guards decide on that state; a model that can write it can open its own gate. Since 0.1.2
+  the path is compared on disk too (samefile), so an 8.3 name, a long-path prefix or an
+  admin share on localhost for the same directory is refused as well.
+
+SendMessage is not on the Plan Mode allowlist (0.1.2): it continues an agent with its own
+context, and that agent may be one that writes.
 
 Environment:
   COMMIT_DISCIPLINE_PLANS_DIR         plan directory (default ~/.claude/plans)
@@ -29,12 +34,13 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import deny, is_within, norm, read_input, state_dir  # noqa: E402
+from _common import (TOO_DEEP, deny, deny_too_deep, is_within, is_within_fs, norm,  # noqa: E402
+                     read_input, state_dir)
 
 PLAN_ALLOWED = {
     'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'ToolSearch', 'Skill',
     'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', 'TodoWrite', 'TaskOutput',
-    'SendMessage', 'ListAgents', 'ListMcpResourcesTool', 'ReadMcpResourceTool',
+    'ListAgents', 'ListMcpResourcesTool', 'ReadMcpResourceTool',
     'ReadMcpResourceDirTool', 'ListSkills', 'SearchSkills', 'ListPlugins', 'SearchPlugins',
 }
 # Built-in subagents whose own tool list is read-only.
@@ -51,7 +57,11 @@ MCP_WRITE = re.compile(
     r'confirm|trigger|start|spawn|install|enable|disable|clear|pin|unpin|finalize|register|'
     r'dismiss|mark|toggle|resize|close|select|switch|change|add|insert|replace|reply|resolve|'
     r'apply|execute|deploy|merge|reset|kill|cancel|approve|submit|convert|duplicate|compose|'
-    r'upscale|crop|expand|cut|retouch|relight|isolate|speak|concatenate)([-_]|$)')
+    r'upscale|crop|expand|cut|retouch|relight|isolate|speak|concatenate|save|store|sync|'
+    r'import|copy|restore|attach|detach|append|prepend|invite|grant|revoke|transfer|schedule|'
+    r'book|upsert|record|track|purge|trash|empty|unshare|subscribe|unsubscribe|follow|vote|'
+    r'react|rate|reject|fork|clone|link|unlink|bind|unbind|edit|modify|overwrite|commit|push|'
+    r'drop|truncate|wipe|erase|destroy|terminate|rent|buy|pay|order|charge|refund)([-_]|$)')
 WRITE_TOOLS = {'Write', 'Edit', 'MultiEdit', 'NotebookEdit'}
 
 
@@ -62,6 +72,8 @@ def readonly_agents():
 
 def main():
     data = read_input()
+    if data is TOO_DEEP:
+        deny_too_deep()
     if data is None:
         return
     tool = data.get('tool_name')
@@ -76,7 +88,7 @@ def main():
         path = norm(raw)
 
     # Rule 2: the guards' state cannot be written (all modes).
-    if path and is_within(path, state_dir()):
+    if raw and is_within_fs(raw, state_dir()):
         deny('plan-gate: %s on %s is blocked. That directory holds the state the guards decide '
              'on; only the hooks themselves write it.' % (tool, raw))
 

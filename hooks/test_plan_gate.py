@@ -24,6 +24,19 @@ def j(*parts):
     return os.path.join(*parts)
 
 
+os.makedirs(STATE, exist_ok=True)
+
+
+def short_name(path):
+    """8.3 form of an existing path on Windows, or None."""
+    if os.name != 'nt':
+        return None
+    import ctypes
+    buf = ctypes.create_unicode_buffer(1024)
+    n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, 1024)
+    return buf.value if n and buf.value.lower() != path.lower() else None
+
+
 def p(mode, tool, tinput=None):
     return {'hook_event_name': 'PreToolUse', 'session_id': 'test', 'permission_mode': mode,
             'tool_name': tool, 'tool_input': tinput or {}}
@@ -57,6 +70,8 @@ CASES = [
     ('deny-state-edit-bypass', 'state', p('bypassPermissions', 'Edit', {'file_path': j(STATE, 'x')}), 'deny'),
     ('deny-state-slash-accept', 'state', p('acceptEdits', 'Write', {'file_path': STATE.replace('\\', '/') + '/x'}), 'deny'),
     ('deny-state-traversal', 'state', p('default', 'Write', {'file_path': j(ROOT, 'tmp', '..', 'state', 'x')}), 'deny'),
+    # c-940 / 0.1.2: H-11, SendMessage continues an agent that may write
+    ('H11-plan-sendmessage', 'plan-send', p('plan', 'SendMessage', {'to': 'x', 'message': 'go'}), 'deny'),
     # allow: Plan Mode, read, search, ask
     ('allow-plan-read', '', p('plan', 'Read', {'file_path': j(PROJ, 'README.md')}), 'allow'),
     ('allow-plan-websearch', '', p('plan', 'WebSearch', {'query': 'x'}), 'allow'),
@@ -78,6 +93,16 @@ CASES = [
     ('allow-no-json', '', 'this is not json', 'allow'),
     ('allow-no-tool-name', '', {'permission_mode': 'plan'}, 'allow'),
 ]
+BS = chr(92)  # a backslash, spelled out so no quoting layer can eat it
+if os.name == 'nt' and STATE[1:2] == ':':  # H-10: other spellings of the state directory
+    CASES += [
+        ('H10-long-prefix', 'state-alias', p('default', 'Write', {'file_path': BS * 2 + '?' + BS + j(STATE, 'green-tests.tsv')}), 'deny'),
+        ('H10-unc-admin-share', 'state-alias',
+         p('default', 'Write', {'file_path': BS * 2 + 'localhost' + BS + STATE[0] + '$' + j(STATE, 'x')[2:]}), 'deny'),
+    ]
+    _short = short_name(STATE)
+    if _short:
+        CASES.append(('H10-short-name', 'state-alias', p('default', 'Edit', {'file_path': j(_short, 'green-tests.tsv')}), 'deny'))
 
 
 def main():
@@ -88,6 +113,11 @@ def main():
     extra = dict(ENV, COMMIT_DISCIPLINE_READONLY_AGENTS='my-reader, other')
     got = run_hook(HOOK, p('plan', 'Agent', {'subagent_type': 'my-reader'}), extra)
     r.check('allow-plan-configured-readonly-agent', got == 'allow', got)
+    import json
+    import re
+    with open(os.path.join(HERE, 'hooks.json'), encoding='utf-8') as f:
+        matcher = json.load(f)['hooks']['PreToolUse'][0]['matcher']
+    r.check('H11-matcher-reaches-sendmessage', re.fullmatch(matcher, 'SendMessage') is not None, matcher)
 
     if '--self-test' in sys.argv[1:]:
         r.section('self-test: break one rule at a time and demand that exactly its checks turn red')
@@ -95,10 +125,18 @@ def main():
             ('write-verb-ignored', ['plan-mcp-write'],
              'if not MCP_WRITE.search(short) and MCP_READ.search(short):',
              'if MCP_READ.search(short):'),
-            ('plan-gate-off', ['plan-write', 'plan-default', 'plan-mcp', 'plan-mcp-write', 'plan-agent'],
+            ('plan-gate-off', ['plan-write', 'plan-default', 'plan-mcp', 'plan-mcp-write', 'plan-agent',
+                               'plan-send'],
              "if mode != 'plan':\n        return", 'return'),
-            ('state-gate-off', ['state'],
-             'if path and is_within(path, state_dir()):', 'if False:'),
+            ('state-gate-off', ['state', 'state-alias'],
+             'if raw and is_within_fs(raw, state_dir()):', 'if False:'),
+            # 0.1.2 (c-940)
+            ('state-compared-as-text', ['state-alias'],
+             'if raw and is_within_fs(raw, state_dir()):',
+             'if raw and is_within(os.path.normcase(os.path.abspath(raw)), state_dir()):'),
+            ('sendmessage-allowed', ['plan-send'],
+             "    'ListAgents', 'ListMcpResourcesTool',",
+             "    'SendMessage', 'ListAgents', 'ListMcpResourcesTool',"),
             ('mcp-all-readable', ['plan-mcp'],
              "MCP_READ = re.compile(r'(?i)(^|[-_])(fetch|",
              "MCP_READ = re.compile(r'(?i)|(^|[-_])(fetch|"),
