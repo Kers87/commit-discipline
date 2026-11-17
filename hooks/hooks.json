@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^(?!(Read|Grep|Glob|WebFetch|WebSearch|ToolSearch|Skill|AskUserQuestion|EnterPlanMode|ExitPlanMode|TodoWrite|TaskOutput|SendMessage|ListAgents)$).*",
+        "matcher": "^(?!(Read|Grep|Glob|WebFetch|WebSearch|ToolSearch|Skill|AskUserQuestion|EnterPlanMode|ExitPlanMode|TodoWrite|TaskOutput|ListAgents)$).*",
         "hooks": [
           { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" plan_gate", "timeout": 30 }
         ]

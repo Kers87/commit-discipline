@@ -49,6 +49,21 @@ included, which also makes the index.lock race harmless instead of patched.
 For a deliberate bulk commit, put `scope-ok: <reason>` in the command. The exception is then
 visible in the transcript instead of silent.
 
+What counts as index-wide: `git add` or `git stage` with `-A`, `-u`, `--all`, `--update` (also
+abbreviated, as git allows, and inside a cluster like `-vA`), and a pathspec that means the
+whole tree: `.`, `./`, `:/`, `:(top)`, a glob, the project root. A commit is refused with
+`-a`/`--all`, `--amend` (also `--amen`), `-i`/`--include` (that commits the index as well),
+without a `--` path list, or with a whole-tree path list. A directory in the path list is
+allowed here; the test gate looks inside it.
+
+The command is read per segment, the way the shell runs it. `cd` and `git -C` only affect the
+segments after them, so `cd ../other && git status; cd ../project && git commit -am x` is
+still refused for the second half. A git call is left alone only when every directory it can
+run in lies outside the project. Script text that goes to a shell counts as commands: a heredoc
+fed to `bash`, `sh -c '...'`, `powershell -Command`, `-EncodedCommand`, `eval`. A heredoc fed
+to `cat` and a quoted commit message remain text. Git Bash paths (`/c/...`) are read as the
+Windows paths they are.
+
 ### commit-test-gate: "tests pass" should be measured, not claimed
 
 A model that says the tests pass is making a claim. This guard records the evidence itself:
@@ -64,6 +79,19 @@ A model that says the tests pass is making a claim. This guard records the evide
 Bare means the whole command is the test call: no `;`, `&&`, `||`, `|`, no redirect, no second
 line, because otherwise the exit code belongs to the last command and not to the test. The only
 flag that counts is `--self-test` (Python) or `-SelfTest` (PowerShell): `--help` also exits 0.
+
+The call must also really run the test. Interpreter flags only from `-I -B -u -E -s -S` (and
+`py -3.x`): `python -V test_x.py` and `-h` exit 0 without opening the file, `-O` strips every
+assert. The interpreter is a bare `python`, `python3` or `py`, or one inside a virtual
+environment (a `pyvenv.cfg` next to its `Scripts` or `bin` folder): a file called `python`
+anywhere else can be anything that exits 0. An environment prefix may only carry variables
+that change output, not what runs (`PYTHONIOENCODING=utf-8` counts, `PATH=`, `PYTHONPATH=` and
+`PYTHONOPTIMIZE=` do not). A test started in the background exits 0 before it ran and is not
+recorded.
+
+A path list item that is not a plain file (a directory, a glob, `:/`) is expanded by asking git
+which tracked files under it differ from HEAD; each of those with a test needs its green run.
+When git cannot tell, the commit is refused.
 
 Content hashes, not timestamps: an mtime can be set back with one line.
 
@@ -86,8 +114,13 @@ soon as the model was allowed to write, it overwrote that file.
 
 A hook deny holds in every permission mode, including `bypassPermissions` (measured).
 
+SendMessage is not on the list: it continues an agent with its own context, and that agent may
+be one that writes.
+
 In every mode, plan-gate also blocks Write and Edit on the guards' state directory. A model
-that can write the evidence can open its own gate.
+that can write the evidence can open its own gate. The path is compared on disk as well as by
+text, so an 8.3 name, a `\\?\` prefix or an admin share (`\\localhost\C$`) for the same
+directory is refused too.
 
 ## Configuration
 
@@ -97,8 +130,9 @@ that can write the evidence can open its own gate.
 | `COMMIT_DISCIPLINE_PLANS_DIR` | `~/.claude/plans` | the one place Plan Mode may write |
 | `COMMIT_DISCIPLINE_READONLY_AGENTS` | (none) | extra subagent names allowed in Plan Mode, comma-separated |
 
-The guards act on the project in `CLAUDE_PROJECT_DIR`. A command that demonstrably drives
-another repository (`git -C <path>` or `cd <path>` outside the project) is left alone.
+The guards act on the project in `CLAUDE_PROJECT_DIR`. A git call that demonstrably runs in
+another repository (after `cd <path>`, `git -C <path>`, `--git-dir` or `GIT_DIR` outside the
+project) is left alone; the rest of the same command is not.
 
 ## Limits, on purpose
 
@@ -107,6 +141,12 @@ another repository (`git -C <path>` or `cd <path>` outside the project) is left 
   own guards.
 - **Pairing is by name in the same directory** (`test_name.py` next to `name.py`). A test with a
   different name or in a separate `tests/` folder is not seen, and that file commits freely.
+- **A script file is not read.** `bash deploy.sh`, `powershell -File x.ps1` and a heredoc fed
+  to `python` run code the guards cannot see; script *text* fed to a shell is read.
+- **Git aliases are not resolved.** `git ci` for `commit` is not seen as a commit.
+- **Read-only subagents are recognised by name** (Explore, Plan, claude-code-guide). Whether
+  such a subagent gets a shell in Plan Mode, and whether its own calls carry `plan`, depends on
+  the Claude Code version; measure before relying on it.
 - **Text cannot catch git called from another program** (a Python `subprocess`, a Makefile).
   If you need that, add a git `pre-commit` hook that only acts when `CLAUDECODE=1`, which is set
   in Claude's tool shell and not in your own terminal.
@@ -133,9 +173,12 @@ python hooks/test_plan_gate.py --self-test
 
 | Suite | Checks | Mutations |
 |---|---|---|
-| scoped-commit | 37 | 2 |
-| commit-test-gate | 56 | 12 |
-| plan-gate | 39 | 6 |
+| scoped-commit | 86 | 2 |
+| commit-test-gate | 84 | 22 |
+| plan-gate | 44 | 8 |
+
+Counts on Windows; a few checks for Windows-only spellings (8.3 names, `\\?\`, admin shares,
+Git Bash paths) are skipped elsewhere. The commit-test-gate test needs `git` on PATH.
 
 The tests follow the plugin's own naming convention, so with the plugin installed the
 commit-test-gate guards this repository too.
