@@ -48,10 +48,10 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (COMMIT_VALUE_LONG, COMMIT_VALUE_SHORT, TooComplex, deny,  # noqa: E402
-                     git_calls,
-                     is_within, norm, project_dir, read_input, sha256, shell_of, split_args,
-                     state_dir)
+from _common import (COMMIT_ATTACHED_SHORT, COMMIT_VALUE_LONG, COMMIT_VALUE_SHORT,  # noqa: E402
+                     TOO_DEEP, TooComplex, _literal, braces, deny, deny_too_deep, git_calls,
+                     is_within, mentions_git, norm, project_dir, read_input, sha256, shell_of,
+                     split_args, state_dir)
 
 MARKER = 'green-tests.tsv'
 
@@ -62,8 +62,9 @@ SAFE_ENV = {'PYTHONIOENCODING', 'PYTHONUTF8', 'PYTHONUNBUFFERED', 'PYTHONDONTWRI
             'LC_CTYPE', 'NO_COLOR', 'FORCE_COLOR', 'TERM', 'COLUMNS', 'TZ', 'CI'}
 ENVPRE = r'(?P<env>(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|<>]+\s+)*)'
 # Interpreter flags that leave the test as it is: -V and -h exit 0 without running anything,
-# -O strips every assert, -c and -m run something else. Only these letters count.
-PYFLAGS = r'(?:-[IBuEsS]+\s+)*'
+# -O strips every assert, -c and -m run something else, -i turns a failing exit into 0.
+# Only these letters count, case-sensitive.
+PYFLAGS = r'(?:(?-i:-[IBbuEsS]+)\s+)*'
 FLAGS_PY = r'(?P<args>(?:\s+--self-test)?)'
 FLAGS_PS = r'(?P<args>(?:\s+-SelfTest)?)'
 FORMS = [re.compile(p, re.I) for p in (
@@ -77,8 +78,11 @@ FORMS = [re.compile(p, re.I) for p in (
 )]
 
 WRITES = re.compile(r'(?i)(Set-Content|Add-Content|Out-File|New-Item|Remove-Item|Copy-Item|'
-                    r'Move-Item|Clear-Content|WriteAll|AppendAll|\btee\b|\bcp\b|\bmv\b|\brm\b|'
-                    r'\btouch\b|sed\s+-i|(?<![0-9-])>)')
+                    r'Move-Item|Rename-Item|Clear-Content|WriteAll|AppendAll|\btee\b|\bcp\b|'
+                    r'\bmv\b|\brm\b|\bcopy\b|\bmove\b|\bdel\b|\berase\b|\bren\b|\bcpi\b|\bmi\b|'
+                    r'\bri\b|\brni\b|\bni\b|\bac\b|\bsc\b|\bclc\b|\bln\b|\bdd\b|\binstall\b|'
+                    r'\btruncate\b|\brmdir\b|mklink|fsutil|robocopy|xcopy|\btouch\b|sed\s+-i|'
+                    r'open\s*\(|write_text|write_bytes|shutil|(?<![0-9-])>)')
 
 
 def source_of(test):
@@ -89,12 +93,13 @@ def source_of(test):
 
 
 def test_of(path):
-    """name.py -> test_name.py, name.ps1 -> test-name.ps1; None for test files themselves."""
+    """name.py -> test_name.py, name.ps1 -> test-name.ps1 (same directory). A source whose
+    own name starts with test_ has a test too: test_helpers.py -> test_test_helpers.py."""
     d, name = os.path.split(path)
     stem, ext = os.path.splitext(name)
-    if ext.lower() == '.py' and not name.lower().startswith('test_'):
+    if ext.lower() == '.py':
         return os.path.join(d, 'test_' + stem + '.py')
-    if ext.lower() == '.ps1' and not name.lower().startswith('test-'):
+    if ext.lower() == '.ps1':
         return os.path.join(d, 'test-' + stem + '.ps1')
     return None
 
@@ -177,34 +182,51 @@ def changed_files(base, specs):
     return [norm(os.path.join(root, n)) for n in names]
 
 
+def commit_files(call, project):
+    """The files one commit call takes along, or None when that cannot be seen."""
+    opts, specs, dd = split_args(call.args, COMMIT_VALUE_SHORT, COMMIT_VALUE_LONG,
+                                 COMMIT_ATTACHED_SHORT)
+    if any(o.startswith('--pathspec-f') for o in opts) or not dd or not specs \
+            or call.hidden_args:
+        return None
+    files, expand = [], {}
+    for written, _ in specs:
+        for t in braces(written):
+            if not _literal(t) and not re.search(r'[*?]', t):
+                return None             # a path known only at run time ($PWD, $(...))
+            plain = not t.startswith(':') and not re.search(r'[*?\[]', t)
+            if plain and call.unknown_dir and not re.match(r'^(?:[A-Za-z]:[\\/]|[\\/]|~)', t):
+                return None             # relative to a directory known only at run time
+            for b in call.bases:
+                full = norm(t, base=b)
+                if plain and full and os.path.isfile(full):
+                    files.append((written, full))
+                elif plain and full and not os.path.exists(full):
+                    continue            # a deleted file: nothing to test
+                else:
+                    expand.setdefault(b, []).append(t)  # a directory, a glob, pathspec magic
+        if expand:
+            for b, ts in sorted(expand.items()):
+                changed = changed_files(b, ts)
+                if changed is None:
+                    return None
+                files += [(os.path.relpath(f, project), f) for f in changed]
+            expand = {}
+    return files
+
+
 def check_commit(data, cmd, project, tsv):
     """PreToolUse rule 1: every committed file with a test file needs a matching green run."""
     calls = [c for c in git_calls(cmd, project, norm(data.get('cwd')), shell_of(data))
              if c.in_project and c.sub == 'commit']
 
-    files, unreadable = [], []          # files: (as written, canonical path)
+    files, unreadable = [], []          # files: (as written, canonical path, call)
     for call in calls:
-        opts, specs, dd = split_args(call.args, COMMIT_VALUE_SHORT, COMMIT_VALUE_LONG)
-        if any(o.startswith('--pathspec-f') for o in opts) or not dd or not specs \
-                or call.hidden_args:
+        got = commit_files(call, project)
+        if got is None:
             unreadable.append(call.text())
-            continue
-        expand = []
-        for t, _ in specs:
-            full = norm(t, base=call.base)
-            plain = not t.startswith(':') and not re.search(r'[*?\[]', t)
-            if plain and full and os.path.isfile(full):
-                files.append((t, full))
-            elif plain and full and not os.path.exists(full):
-                continue                # a deleted file: nothing to test
-            else:
-                expand.append(t)        # a directory, a glob, pathspec magic
-        if expand:
-            changed = changed_files(call.base, expand)
-            if changed is None:
-                unreadable.append(call.text())
-            else:
-                files += [(os.path.relpath(f, project), f) for f in changed]
+        else:
+            files += [(p, f, call) for p, f in got]
     if unreadable:
         deny("commit-test-gate: cannot see which files this commit takes along ('%s'). Use "
              'git commit -m "..." -- <paths>.' % "'; '".join(unreadable))
@@ -220,12 +242,18 @@ def check_commit(data, cmd, project, tsv):
                     seen.add(d[0])
                     good.add((d[0], d[3], d[4], d[5]))
 
-    blocked = []
-    for p, full in files:
+    blocked, changing = [], []
+    for p, full, call in files:
         if not is_within(full, project) or not os.path.isfile(full):
             continue
         test = test_of(full)
         if not test or not os.path.isfile(test):
+            continue
+        # An earlier command in the same line may change the file or its test after this
+        # check and before the commit: then the green run proves nothing about what is
+        # committed (S-01 of the 0.1.2 slooppas).
+        if any(t and (t == full or t == test or is_within(full, t)) for t in call.touched):
+            changing.append(p)
             continue
         rel = os.path.relpath(test, project)
         if (test, sha256(test), full, sha256(full)) in good:
@@ -234,6 +262,11 @@ def check_commit(data, cmd, project, tsv):
             blocked.append('%s (file or test changed since the last green run of %s)' % (p, rel))
         else:
             blocked.append('%s (test %s has not run green yet)' % (p, rel))
+    if changing:
+        deny('commit-test-gate: refused for %s. An earlier command in the same line may change '
+             'it before the commit, so its green run says nothing about what is committed. '
+             'Run that command, then the test, then commit, as separate calls.'
+             % '; '.join(changing))
     if blocked:
         deny('commit-test-gate: refused for %s. Run the test green first as a bare command, '
              'without chaining, redirects or flags other than --self-test / -SelfTest (e.g. '
@@ -243,6 +276,8 @@ def check_commit(data, cmd, project, tsv):
 
 def main():
     data = read_input()
+    if data is TOO_DEEP:
+        deny_too_deep()
     if data is None:
         return
     event = data.get('hook_event_name')
@@ -266,17 +301,20 @@ def main():
         deny('commit-test-gate: this command writes to %s. That file is the evidence of green '
              'test runs; only the hook itself writes it.' % MARKER)
 
-    # Rule 1.
+    # Rule 1. A command that names a commit but cannot be read is refused.
     try:
         check_commit(data, cmd, project, tsv)
     except SystemExit:
         raise
     except TooComplex:
-        if re.search(r'(?i)commit', cmd):
+        if mentions_git(cmd):
             deny('commit-test-gate: the command nests too deeply to see which files a commit '
                  'takes along. Split it into plain commands.')
         return
     except Exception:
+        if mentions_git(cmd) and re.search(r'(?i)commit', re.sub(r'[\'"`\\^]', '', cmd)):
+            deny('commit-test-gate: the command could not be read. Split it into plain '
+                 'commands.')
         return
 
 

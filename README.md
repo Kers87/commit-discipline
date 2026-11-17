@@ -80,9 +80,9 @@ Bare means the whole command is the test call: no `;`, `&&`, `||`, `|`, no redir
 line, because otherwise the exit code belongs to the last command and not to the test. The only
 flag that counts is `--self-test` (Python) or `-SelfTest` (PowerShell): `--help` also exits 0.
 
-The call must also really run the test. Interpreter flags only from `-I -B -u -E -s -S` (and
-`py -3.x`): `python -V test_x.py` and `-h` exit 0 without opening the file, `-O` strips every
-assert. The interpreter is a bare `python`, `python3` or `py`, or one inside a virtual
+The call must also really run the test. Interpreter flags only from `-I -B -b -u -E -s -S`
+(and `py -3.x`), case-sensitive: `python -V test_x.py` and `-h` exit 0 without opening the
+file, `-O` strips every assert, `-i` turns a failing exit into 0. The interpreter is a bare `python`, `python3` or `py`, or one inside a virtual
 environment (a `pyvenv.cfg` next to its `Scripts` or `bin` folder): a file called `python`
 anywhere else can be anything that exits 0. An environment prefix may only carry variables
 that change output, not what runs (`PYTHONIOENCODING=utf-8` counts, `PATH=`, `PYTHONPATH=` and
@@ -91,7 +91,13 @@ recorded.
 
 A path list item that is not a plain file (a directory, a glob, `:/`) is expanded by asking git
 which tracked files under it differ from HEAD; each of those with a test needs its green run.
-When git cannot tell, the commit is refused.
+When git cannot tell, or a path is only known at run time (`$PWD`, `$(...)`), the commit is
+refused.
+
+The check runs before the command does. So when an earlier command in the same line names a
+committed file or its test, or writes to it (`black x.py && git commit -- x.py`,
+`echo y >> x.py && ...`), the commit is refused: its green run says nothing about what would be
+committed. Reading commands, `git add` and the script an interpreter runs do not count.
 
 Content hashes, not timestamps: an mtime can be set back with one line.
 
@@ -141,8 +147,13 @@ project) is left alone; the rest of the same command is not.
   own guards.
 - **Pairing is by name in the same directory** (`test_name.py` next to `name.py`). A test with a
   different name or in a separate `tests/` folder is not seen, and that file commits freely.
-- **A script file is not read.** `bash deploy.sh`, `powershell -File x.ps1` and a heredoc fed
-  to `python` run code the guards cannot see; script *text* fed to a shell is read.
+- **A script file is not read.** `bash deploy.sh`, `powershell -File x.ps1`, `cat x | bash`
+  and a heredoc fed to `python` run code the guards cannot see; script *text* fed to a shell
+  (as an argument, a heredoc, a here-string or through a pipe from `echo`) is read. Likewise a
+  script that changes a committed file without naming it on the command line
+  (`python fix.py && git commit -- x.py`) is not caught by the same-line rule.
+- **Other ways to make a commit are not guarded**: `merge`, `cherry-pick`, `revert`,
+  `reset --soft` followed by a commit (an amend in effect), `update-index`.
 - **Only aliases in the command itself are resolved** (`git -c alias.ci=commit ci`). An alias
   from a git config file is not seen: `git ci` stays an unknown subcommand.
 - **A command name computed at run time is not seen** (`& (Get-Command git) add -A`,
@@ -175,6 +186,16 @@ precisely the checks guarding that rule turn red.
 python hooks/test_scoped_commit.py --self-test
 python hooks/test_commit_test_gate.py --self-test
 python hooks/test_plan_gate.py --self-test
+```
+
+The `extra_*.py` suites next to them were written by an independent reviewer who tried to get
+around 0.1.2 before its release; every case there was red at first. They run without
+mutations, and only on Windows (CI runs them on the Windows runner):
+
+```
+python hooks/extra_scoped_commit.py
+python hooks/extra_commit_test_gate.py
+python hooks/extra_plan_gate.py
 ```
 
 | Suite | Checks | Mutations |

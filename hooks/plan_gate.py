@@ -34,7 +34,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import deny, is_within, is_within_fs, norm, read_input, state_dir  # noqa: E402
+from _common import (TOO_DEEP, deny, deny_too_deep, is_within, is_within_fs, norm,  # noqa: E402
+                     read_input, state_dir)
 
 PLAN_ALLOWED = {
     'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'ToolSearch', 'Skill',
@@ -56,7 +57,11 @@ MCP_WRITE = re.compile(
     r'confirm|trigger|start|spawn|install|enable|disable|clear|pin|unpin|finalize|register|'
     r'dismiss|mark|toggle|resize|close|select|switch|change|add|insert|replace|reply|resolve|'
     r'apply|execute|deploy|merge|reset|kill|cancel|approve|submit|convert|duplicate|compose|'
-    r'upscale|crop|expand|cut|retouch|relight|isolate|speak|concatenate)([-_]|$)')
+    r'upscale|crop|expand|cut|retouch|relight|isolate|speak|concatenate|save|store|sync|'
+    r'import|copy|restore|attach|detach|append|prepend|invite|grant|revoke|transfer|schedule|'
+    r'book|upsert|record|track|purge|trash|empty|unshare|subscribe|unsubscribe|follow|vote|'
+    r'react|rate|reject|fork|clone|link|unlink|bind|unbind|edit|modify|overwrite|commit|push|'
+    r'drop|truncate|wipe|erase|destroy|terminate|rent|buy|pay|order|charge|refund)([-_]|$)')
 WRITE_TOOLS = {'Write', 'Edit', 'MultiEdit', 'NotebookEdit'}
 
 
@@ -67,6 +72,8 @@ def readonly_agents():
 
 def main():
     data = read_input()
+    if data is TOO_DEEP:
+        deny_too_deep()
     if data is None:
         return
     tool = data.get('tool_name')

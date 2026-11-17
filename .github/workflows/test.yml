@@ -29,6 +29,12 @@ jobs:
       - run: python hooks/test_scoped_commit.py --self-test
       - run: python hooks/test_commit_test_gate.py --self-test
       - run: python hooks/test_plan_gate.py --self-test
+      - if: runner.os == 'Windows'
+        run: python hooks/extra_scoped_commit.py
+      - if: runner.os == 'Windows'
+        run: python hooks/extra_commit_test_gate.py
+      - if: runner.os == 'Windows'
+        run: python hooks/extra_plan_gate.py
       - name: launcher finds a working Python
         shell: bash
         run: echo '{"tool_name":"Bash","tool_input":{"command":"git add -A"}}' | sh hooks/run.sh scoped_commit | grep -q '"deny"'

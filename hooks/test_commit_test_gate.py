@@ -310,7 +310,7 @@ def main():
             ('shell-text-is-documentation', 'gate', ['shell-text'], '_common.py',
              "SHELLS = {'bash',", "SHELLS = set() and {'bash',"),
             ('interp-flags-free', 'log', ['iflag'], 'commit_test_gate.py',
-             "PYFLAGS = r'(?:-[IBuEsS]+\\s+)*'", "PYFLAGS = r'(?:-[A-Za-z]+\\s+)*'"),
+             "PYFLAGS = r'(?:(?-i:-[IBbuEsS]+)\\s+)*'", "PYFLAGS = r'(?:-[A-Za-z]+\\s+)*'"),
             ('any-python', 'log', ['interp'], 'commit_test_gate.py',
              "    interp = m.group('interp')\n", '    return True\n'),
             ('any-env', 'log', ['envpre'], 'commit_test_gate.py',

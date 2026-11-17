@@ -42,6 +42,28 @@ the self-test that is red on 0.1.1 and green now.
   now: `Invoke-Expression -Command "..."`, `Start-Process git -ArgumentList ...`, an alias set
   with `git -c alias.x=...`, and `xargs git add|commit` (refused: the paths arrive at run time).
 
+- Found by an independent review (slooppas) of 0.1.2 before release, 22 findings, all with a
+  case in the new `extra_*.py` suites (written by the reviewer) that was red first:
+  - the test gate hashed the files before the command ran, so `fix.sh && git commit -- x`,
+    `black x && git commit -- x` or `echo y >> x && git commit -- x` committed content that
+    never ran green. A commit is now refused when an earlier command in the same line names
+    the file or its test or writes to it (S-01);
+  - in Git Bash a backslash inside "..." was dropped, so `"C:\path"` read as `C:path`; it now
+    only escapes `$ \` " \` and a newline, as in bash (S-02);
+  - quoted options (`git add '-A'`), paths known only at run time (`$PWD`, `$(...)`), a random
+    pick between two possible directories after a `cd` in a block, `python -i` (turns a failing
+    exit into 0), an empty `-C ""` or `cd ""`, script text piped or here-stringed into a shell
+    or `iex`, `$( )` in an unquoted heredoc or `@"..."@`, `xargs -I{}` and `find -exec`, a
+    redirect target that is a `$( )`, PowerShell `<# #>` comments, `timeout`, `winpty`,
+    `command -p`, `bash -o pipefail -c`, `-S` swallowing the next option, `--renormalize`,
+    brace expansion to `.`, `help.autocorrect` typos, Start-Process arguments that start with
+    a dash, a hard link to the evidence file, deeply nested JSON input, more shell aliases
+    that write the evidence file (`copy`, `ac`, `python -c open(...)`), more MCP write verbs
+    (`save`, `store`, `sync`, ...), a source named `test_x.py` with its own test, quadratic
+    time on one very long word, nesting without a literal `git`, and a hook working directory
+    outside the project (S-03 to S-22);
+  - a command that names git but cannot be read is now refused instead of let through.
+
 ### Changed
 - The two commit guards share one reading of a shell command (`git_calls` in `_common.py`)
   instead of two regexes that disagreed on what a git call is.
